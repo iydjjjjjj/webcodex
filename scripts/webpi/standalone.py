@@ -55,6 +55,25 @@ SERVER_DATA = SERVER_DIR / "data"
 CONNECTIONS = STATE / "connections"
 MANIFEST = STATE / "manifest.json"
 ACTION_TOKEN_FILE = STATE / "webpi-action-token"
+PLUGIN_LOGIN_TOKEN_FILE = STATE / "webpi-plugin-login-token"
+PLUGIN_OAUTH_CLIENT_FILE = STATE / "webpi-plugin-oauth-client.json"
+PLUGIN_LOGIN_TOKEN_NAME = "webpi-plugin-login"
+PLUGIN_OAUTH_CLIENT_NAME = "webpi-chatgpt-plugin"
+PLUGIN_OAUTH_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect"
+PLUGIN_OAUTH_ALLOWED_SCOPES = (
+    "runtime:read",
+    "runner:manage",
+    "session:collaborate",
+    "project:read",
+    "project:write",
+    "job:run",
+    "plugin:inspect",
+    "plugin:invoke",
+    "computer:read",
+    "computer:display_read",
+    "browser:read",
+    "diagnostics:read",
+)
 ACTION_TOKEN_NAME = "webpi-action"
 PORT = 56542
 SERVER_URL = f"http://127.0.0.1:{PORT}"
@@ -433,6 +452,33 @@ def configure_public_url(public_url: str) -> None:
         }
     )
 
+def configure_plugin_mcp() -> dict[str, object]:
+    ensure_server_state()
+    public_url = configured_public_url(SERVER_ENV)
+    if public_url is None:
+        raise RuntimeError("WebPi Plugin MCP requires WEBPI_PUBLIC_URL to be configured first")
+    normalized = normalize_public_url(public_url)
+    _replace_env_values(
+        SERVER_ENV,
+        {
+            "WEBPI_PUBLIC_ACTIONS_ONLY": "true",
+            "WEBPI_PUBLIC_PLUGIN_MCP_ENABLED": "true",
+            "WEBPI_OAUTH2_ENABLED": "true",
+            "WEBPI_OAUTH2_REQUIRE_PKCE": "true",
+            "WEBPI_OAUTH2_ISSUER": normalized,
+            "WEBPI_OAUTH2_SHARED_KEY_BRIDGE": "false",
+            "WEBPI_PROJECT_SHARE_MCP_QUERY_TOKEN_ENABLED": "false",
+        },
+    )
+    return {
+        "status": "plugin-mcp-configured",
+        "public_url": normalized,
+        "mcp_url": f"{normalized}/mcp",
+        "oauth_issuer": normalized,
+        "pkce_required": True,
+        "restart_required": server_is_online(),
+    }
+
 def safe_status() -> dict[str, object]:
     manifest = load_manifest()
     runner_path = Path(str(manifest.get("runner_config", ""))) if manifest else None
@@ -456,6 +502,18 @@ def safe_status() -> dict[str, object]:
     )
     live_auth_hardened = None if live_bearer_status is None else live_bearer_status == 401
     public_actions_only = env.get("WEBPI_PUBLIC_ACTIONS_ONLY", "").strip().lower() == "true"
+    public_plugin_mcp_enabled = env.get("WEBPI_PUBLIC_PLUGIN_MCP_ENABLED", "").strip().lower() == "true"
+    oauth2_enabled = env.get("WEBPI_OAUTH2_ENABLED", "").strip().lower() == "true"
+    oauth2_require_pkce = env.get("WEBPI_OAUTH2_REQUIRE_PKCE", "").strip().lower() == "true"
+    oauth2_issuer = env.get("WEBPI_OAUTH2_ISSUER", "").strip().rstrip("/")
+    public_plugin_mcp_ready = bool(
+        public_plugin_mcp_enabled
+        and public_actions_only
+        and oauth2_enabled
+        and oauth2_require_pkce
+        and public_url
+        and oauth2_issuer == public_url.rstrip("/")
+    )
     invalid_auth_rate_limit_enabled = env.get("WEBPI_PUBLIC_INVALID_AUTH_RATE_LIMIT_ENABLED", "").strip().lower() == "true"
     invalid_auth_rate_limit_max = env.get("WEBPI_PUBLIC_INVALID_AUTH_RATE_LIMIT_MAX", "").strip()
     invalid_auth_rate_limit_window_secs = env.get("WEBPI_PUBLIC_INVALID_AUTH_RATE_LIMIT_WINDOW_SECS", "").strip()
@@ -489,7 +547,13 @@ def safe_status() -> dict[str, object]:
         "auth_hardened": auth_config_hardened and server_online and live_auth_hardened is True,
         "restart_required_for_auth": bool(server_online and auth_config_hardened and live_auth_hardened is not True),
         "public_actions_only": public_actions_only,
-        "public_mcp_exposed": False,
+        "public_mcp_exposed": public_plugin_mcp_ready,
+        "public_plugin_mcp_enabled": public_plugin_mcp_enabled,
+        "oauth2_enabled": oauth2_enabled,
+        "oauth2_require_pkce": oauth2_require_pkce,
+        "oauth2_issuer_matches_public_url": bool(public_url and oauth2_issuer == public_url.rstrip("/")),
+        "plugin_login_token_present": PLUGIN_LOGIN_TOKEN_FILE.is_file(),
+        "plugin_oauth_client_present": PLUGIN_OAUTH_CLIENT_FILE.is_file(),
         "public_tools_call_exposed": False,
         "public_invalid_auth_rate_limit_enabled": invalid_auth_rate_limit_enabled,
         "public_invalid_auth_rate_limit_max": invalid_auth_rate_limit_max,
@@ -957,6 +1021,194 @@ def stale_action_token_ids(tokens: list[object], token: str) -> list[str]:
         if isinstance(token_id, str) and token_id:
             stale.append(token_id)
     return stale
+
+
+def _write_private_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    temp = Path(temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            _copy_private_permissions(SERVER_ENV, temp)
+            stream.write(value)
+            if not value.endswith("\n"):
+                stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _active_named_token_record(
+    tokens: list[object], *, name: str, plaintext: str, scopes: list[str]
+) -> dict[str, object] | None:
+    prefix = plaintext[:16]
+    desired = set(scopes)
+    for item in tokens:
+        if not isinstance(item, dict):
+            continue
+        if item.get("name") != name or item.get("revoked_at") is not None:
+            continue
+        if item.get("token_prefix") != prefix:
+            continue
+        actual = item.get("scopes")
+        if not isinstance(actual, list) or not all(isinstance(scope, str) for scope in actual):
+            return None
+        return item if set(actual) == desired else None
+    return None
+
+
+def _stale_named_token_ids(tokens: list[object], *, name: str, keep_prefix: str) -> list[str]:
+    stale: list[str] = []
+    for item in tokens:
+        if not isinstance(item, dict):
+            continue
+        if item.get("name") != name or item.get("revoked_at") is not None:
+            continue
+        if item.get("token_prefix") == keep_prefix:
+            continue
+        token_id = item.get("id")
+        if isinstance(token_id, str) and token_id:
+            stale.append(token_id)
+    return stale
+
+
+def provision_plugin_login_token() -> dict[str, object]:
+    inventory = admin_post("/api/tokens/list", {"username": USERNAME})
+    tokens = inventory.get("tokens")
+    if not isinstance(tokens, list):
+        raise RuntimeError("WebPi token inventory is malformed")
+
+    current: str | None = None
+    if PLUGIN_LOGIN_TOKEN_FILE.is_file():
+        candidate = PLUGIN_LOGIN_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if candidate.startswith("wc_pat_") and _active_named_token_record(
+            tokens, name=PLUGIN_LOGIN_TOKEN_NAME, plaintext=candidate, scopes=[]
+        ) is not None:
+            current = candidate
+
+    rotated = current is None
+    if current is None:
+        created = admin_post(
+            "/api/tokens/create",
+            {"username": USERNAME, "name": PLUGIN_LOGIN_TOKEN_NAME, "scopes": []},
+        )
+        current = created.get("token") if isinstance(created, dict) else None
+        if not isinstance(current, str) or not current.startswith("wc_pat_"):
+            raise RuntimeError("WebPi Plugin login token creation returned no PAT")
+        _write_private_text(PLUGIN_LOGIN_TOKEN_FILE, current)
+
+    stale_ids = _stale_named_token_ids(
+        tokens, name=PLUGIN_LOGIN_TOKEN_NAME, keep_prefix=current[:16]
+    )
+    for token_id in stale_ids:
+        admin_post("/api/tokens/revoke", {"username": USERNAME, "token_id": token_id})
+
+    return {
+        "ready": True,
+        "rotated": rotated,
+        "token_file": str(PLUGIN_LOGIN_TOKEN_FILE),
+        "scopes": [],
+        "stale_revoked": len(stale_ids),
+    }
+
+
+def _load_plugin_oauth_client_secret() -> dict[str, object] | None:
+    if not PLUGIN_OAUTH_CLIENT_FILE.is_file():
+        return None
+    try:
+        value = json.loads(PLUGIN_OAUTH_CLIENT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    if not isinstance(value.get("client_id"), str) or not str(value["client_id"]).startswith("wc_client_"):
+        return None
+    if not isinstance(value.get("client_secret"), str) or not str(value["client_secret"]).startswith("wc_csec_"):
+        return None
+    return value
+
+
+def _plugin_oauth_client_matches(item: object, client_id: str) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return (
+        item.get("client_id") == client_id
+        and item.get("name") == PLUGIN_OAUTH_CLIENT_NAME
+        and item.get("revoked_at") is None
+        and item.get("redirect_uris") == [PLUGIN_OAUTH_REDIRECT_URI]
+        and item.get("allowed_scopes") == list(PLUGIN_OAUTH_ALLOWED_SCOPES)
+    )
+
+
+def provision_plugin_oauth_client() -> dict[str, object]:
+    inventory = admin_post("/api/oauth/clients/list", {})
+    clients = inventory.get("clients")
+    if not isinstance(clients, list):
+        raise RuntimeError("WebPi OAuth client inventory is malformed")
+
+    stored = _load_plugin_oauth_client_secret()
+    current_id = str(stored.get("client_id")) if stored is not None else ""
+    current = next((item for item in clients if _plugin_oauth_client_matches(item, current_id)), None)
+    rotated = current is None
+
+    if current is None:
+        created = admin_post(
+            "/api/oauth/clients/create",
+            {
+                "name": PLUGIN_OAUTH_CLIENT_NAME,
+                "redirect_uris": [PLUGIN_OAUTH_REDIRECT_URI],
+                "allowed_scopes": list(PLUGIN_OAUTH_ALLOWED_SCOPES),
+            },
+        )
+        client = created.get("client") if isinstance(created, dict) else None
+        secret = created.get("client_secret") if isinstance(created, dict) else None
+        client_id = client.get("client_id") if isinstance(client, dict) else None
+        if not isinstance(client_id, str) or not client_id.startswith("wc_client_"):
+            raise RuntimeError("WebPi Plugin OAuth client creation returned no client id")
+        if not isinstance(secret, str) or not secret.startswith("wc_csec_"):
+            raise RuntimeError("WebPi Plugin OAuth client creation returned no client secret")
+        stored = {
+            "client_id": client_id,
+            "client_secret": secret,
+            "redirect_uri": PLUGIN_OAUTH_REDIRECT_URI,
+            "allowed_scopes": list(PLUGIN_OAUTH_ALLOWED_SCOPES),
+        }
+        _write_private_text(
+            PLUGIN_OAUTH_CLIENT_FILE,
+            json.dumps(stored, ensure_ascii=False, indent=2),
+        )
+        current_id = client_id
+
+    stale_ids = [
+        str(item.get("client_id"))
+        for item in clients
+        if isinstance(item, dict)
+        and item.get("name") == PLUGIN_OAUTH_CLIENT_NAME
+        and item.get("revoked_at") is None
+        and item.get("client_id") != current_id
+        and isinstance(item.get("client_id"), str)
+        and item.get("client_id")
+    ]
+    for client_id in stale_ids:
+        admin_post("/api/oauth/clients/revoke", {"client_id": client_id})
+
+    return {
+        "ready": True,
+        "rotated": rotated,
+        "client_id": current_id,
+        "redirect_uri": PLUGIN_OAUTH_REDIRECT_URI,
+        "allowed_scopes": list(PLUGIN_OAUTH_ALLOWED_SCOPES),
+        "client_secret_file": str(PLUGIN_OAUTH_CLIENT_FILE),
+        "stale_revoked": len(stale_ids),
+    }
+
+
+def provision_plugin_auth() -> dict[str, object]:
+    login = provision_plugin_login_token()
+    client = provision_plugin_oauth_client()
+    return {"status": "ready", "login": login, "oauth_client": client}
 
 
 def provision_action_token(manifest: dict[str, object]) -> None:
@@ -3252,6 +3504,8 @@ Common:
 Security / public access:
   webpi.cmd verify [args...]       Run WebPi security smoke checks
   webpi.cmd cloudflare-config URL  Register the HTTPS public origin (no tunnel token is stored)
+  webpi.cmd plugin-mcp-config      Enable fail-closed public Plugin MCP + OAuth on the configured public origin
+  webpi.cmd plugin-auth-provision Provision private Plugin login PAT + predefined OAuth client without printing secrets
   webpi.cmd tunnel-config          Configure the WebPi-local secure MCP tunnel
   webpi.cmd run-web                Run Server + Runner + configured tunnel
   webpi.cmd migrate-config [--check]
@@ -3271,7 +3525,7 @@ and private keys out of chat, logs, and Git.
 
 
 def usage_text() -> str:
-    return "usage: webpi.cmd [help|init|status|doctor|verify|migrate-config|cloudflare-config|public-url-config|tunnel-config|pi|enroll|bootstrap-upgrade|server|runner|tunnel|run|run-web]"
+    return "usage: webpi.cmd [help|init|status|doctor|verify|migrate-config|cloudflare-config|public-url-config|plugin-mcp-config|plugin-auth-provision|tunnel-config|pi|enroll|bootstrap-upgrade|server|runner|tunnel|run|run-web]"
 
 
 def main() -> int:
@@ -3306,6 +3560,9 @@ def main() -> int:
             raise SystemExit(f"usage: webpi.cmd {action} https://webpi.example.com")
         configure_public_url(sys.argv[2])
         return 0
+    if action == "plugin-mcp-config":
+        json_print(configure_plugin_mcp())
+        return 0
     if action == "verify":
         from security_smoke import main as verify_main
         return verify_main(sys.argv[2:])
@@ -3313,6 +3570,9 @@ def main() -> int:
         return run_pi_admin(sys.argv[2:])
     if action == "enroll":
         enroll()
+        return 0
+    if action == "plugin-auth-provision":
+        json_print(provision_plugin_auth())
         return 0
     if action == "bootstrap-upgrade":
         args = sys.argv[2:]
