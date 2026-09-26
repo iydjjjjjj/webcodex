@@ -169,6 +169,11 @@ pub(crate) fn tool_spec() -> Value {
         "securitySchemes": [
             {"type": "oauth2", "scopes": [SCOPE_MCP_LOCAL]}
         ],
+        "_meta": {
+            "securitySchemes": [
+                {"type": "oauth2", "scopes": [SCOPE_MCP_LOCAL]}
+            ]
+        },
         "annotations": {
             "readOnlyHint": false
         }

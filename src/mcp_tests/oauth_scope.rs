@@ -139,6 +139,10 @@ async fn oauth2_mcp_tools_list_requires_runtime_read() {
         runtime_status["securitySchemes"],
         json!([{"type":"oauth2","scopes":[crate::auth::SCOPE_RUNTIME_READ]}])
     );
+    assert_eq!(
+        runtime_status["_meta"]["securitySchemes"],
+        runtime_status["securitySchemes"]
+    );
 
     let (_tmp, service, token) = oauth_mcp_service("project:read");
     let (status, body, challenge) =
@@ -196,6 +200,10 @@ async fn oauth2_mcp_local_gateway_catalog_and_call_require_explicit_scope() {
     assert_eq!(
         local_gateway["securitySchemes"],
         json!([{"type":"oauth2","scopes":[crate::auth::SCOPE_MCP_LOCAL]}])
+    );
+    assert_eq!(
+        local_gateway["_meta"]["securitySchemes"],
+        local_gateway["securitySchemes"]
     );
 
     let (status, body, _) = oauth_mcp_request(

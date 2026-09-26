@@ -922,11 +922,12 @@ fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> V
             "annotations": annotations,
         })
     };
+    let security_schemes = mcp_tool_security_schemes(&tool_name);
     if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "securitySchemes".to_string(),
-            mcp_tool_security_schemes(&tool_name),
-        );
+        object.insert("securitySchemes".to_string(), security_schemes.clone());
+    }
+    if let Some(meta) = tool_meta_object(&mut value) {
+        meta.insert("securitySchemes".to_string(), security_schemes);
     }
     if !compact && tool_name == crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME {
         if let Some(object) = value.as_object_mut() {
