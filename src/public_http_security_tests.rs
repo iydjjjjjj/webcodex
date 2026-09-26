@@ -19,7 +19,17 @@ fn security_router() -> Router {
         .push(Router::with_path("artifact-download").get(ok_handler))
         .push(Router::with_path("api/actions/runtime_status").post(ok_handler))
         .push(Router::with_path("api/tools/call").post(ok_handler))
-        .push(Router::with_path("mcp").post(ok_handler))
+        .push(Router::with_path("mcp").get(ok_handler).post(ok_handler))
+        .push(Router::with_path(".well-known/oauth-protected-resource").get(ok_handler))
+        .push(Router::with_path(".well-known/oauth-authorization-server").get(ok_handler))
+        .push(Router::with_path("oauth/authorize").get(ok_handler))
+        .push(Router::with_path("oauth/authorize/login").post(ok_handler))
+        .push(Router::with_path("oauth/authorize/consent").post(ok_handler))
+        .push(Router::with_path("oauth/token").post(ok_handler))
+        .push(Router::with_path("oauth/revoke").post(ok_handler))
+        .push(Router::with_path("oauth/authorize/bridge").post(ok_handler))
+        .push(Router::with_path("oauth/authorize/project").post(ok_handler))
+        .push(Router::with_path("api/oauth/clients/create").post(ok_handler))
         .push(Router::with_path("admin").get(ok_handler))
 }
 
@@ -71,6 +81,108 @@ async fn public_surface_allows_only_openapi_and_actions_while_loopback_stays_ful
         .send(&service)
         .await;
     assert_eq!(loopback.status_code, Some(StatusCode::OK));
+}
+
+#[tokio::test]
+async fn explicit_public_plugin_mcp_mode_exposes_only_mcp_and_oauth_protocol_routes() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("WEBPI_PUBLIC_URL", "https://webpi.example");
+    env.set("WEBPI_PUBLIC_ACTIONS_ONLY", "true");
+    env.set("WEBPI_PUBLIC_PLUGIN_MCP_ENABLED", "true");
+    let service = Service::new(security_router());
+
+    for (method, path) in [
+        ("GET", "/mcp"),
+        ("POST", "/mcp"),
+        ("GET", "/.well-known/oauth-protected-resource"),
+        ("GET", "/.well-known/oauth-authorization-server"),
+        ("GET", "/oauth/authorize"),
+        ("POST", "/oauth/authorize/login"),
+        ("POST", "/oauth/authorize/consent"),
+        ("POST", "/oauth/token"),
+        ("POST", "/oauth/revoke"),
+    ] {
+        let url = format!("http://webpi.example{path}");
+        let response = if method == "GET" {
+            TestClient::get(url)
+                .add_header("host", "webpi.example", true)
+                .send(&service)
+                .await
+        } else {
+            TestClient::post(url)
+                .add_header("host", "webpi.example", true)
+                .send(&service)
+                .await
+        };
+        assert_eq!(
+            response.status_code,
+            Some(StatusCode::OK),
+            "{method} {path}"
+        );
+    }
+
+    for (method, path) in [
+        ("POST", "/api/tools/call"),
+        ("GET", "/admin"),
+        ("POST", "/oauth/authorize/bridge"),
+        ("POST", "/oauth/authorize/project"),
+        ("POST", "/api/oauth/clients/create"),
+    ] {
+        let url = format!("http://webpi.example{path}");
+        let response = if method == "GET" {
+            TestClient::get(url)
+                .add_header("host", "webpi.example", true)
+                .send(&service)
+                .await
+        } else {
+            TestClient::post(url)
+                .add_header("host", "webpi.example", true)
+                .send(&service)
+                .await
+        };
+        assert_eq!(
+            response.status_code,
+            Some(StatusCode::NOT_FOUND),
+            "{method} {path}"
+        );
+    }
+}
+
+#[test]
+fn public_plugin_mcp_mode_fails_closed_without_https_oauth_prerequisites() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("WEBPI_PUBLIC_PLUGIN_MCP_ENABLED", "true");
+    env.set("WEBPI_PUBLIC_ACTIONS_ONLY", "true");
+    env.set("WEBPI_PUBLIC_URL", "https://webpi.example");
+    env.remove("WEBPI_OAUTH2_ENABLED");
+    env.remove("WEBPI_OAUTH2_ISSUER");
+    let config = crate::Config::from_env();
+    assert!(crate::public_http_security::validate_public_plugin_mcp_config(&config).is_err());
+
+    env.set("WEBPI_OAUTH2_ENABLED", "true");
+    env.set("WEBPI_OAUTH2_ISSUER", "http://webpi.example");
+    let config = crate::Config::from_env();
+    assert!(crate::public_http_security::validate_public_plugin_mcp_config(&config).is_err());
+
+    env.set("WEBPI_OAUTH2_ISSUER", "https://other.example");
+    let config = crate::Config::from_env();
+    assert!(crate::public_http_security::validate_public_plugin_mcp_config(&config).is_err());
+}
+
+#[test]
+fn public_plugin_mcp_mode_accepts_matching_https_oauth_origin() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("WEBPI_PUBLIC_PLUGIN_MCP_ENABLED", "true");
+    env.set("WEBPI_PUBLIC_ACTIONS_ONLY", "true");
+    env.set("WEBPI_PUBLIC_URL", "https://webpi.example");
+    env.set("WEBPI_OAUTH2_ENABLED", "true");
+    env.set("WEBPI_OAUTH2_ISSUER", "https://webpi.example/");
+    env.set("WEBPI_OAUTH2_REQUIRE_PKCE", "true");
+    let config = crate::Config::from_env();
+    assert_eq!(
+        crate::public_http_security::validate_public_plugin_mcp_config(&config),
+        Ok(())
+    );
 }
 
 #[tokio::test]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
-from scripts.webpi.security_smoke import NoRedirect, authentication_checks, public_surface_checks, require_authenticated_origin, validate_origin, verify
+from scripts.webpi.security_smoke import NoRedirect, authentication_checks, public_surface_checks, public_surface_checks_with_mode, require_authenticated_origin, validate_origin, verify
 
 
 class SecurityAcceptanceTests(unittest.TestCase):
@@ -52,6 +52,42 @@ class SecurityAcceptanceTests(unittest.TestCase):
         checks = public_surface_checks("https://example.com")
         self.assertTrue(all(item["passed"] for item in checks))
         self.assertEqual({item["route"] for item in checks if item["check"] == "public_surface_hidden"}, {"/api/tools/call", "/mcp", "/admin"})
+
+    @patch("scripts.webpi.security_smoke.request_json")
+    def test_public_plugin_mcp_surface_requires_oauth_and_keeps_internal_routes_hidden(self, request):
+        def reply(_base, route, _payload, authorization=None, timeout=8.0):
+            del authorization, timeout
+            if route == "/api/actions/runtime_status":
+                return 401, {"error": "Unauthorized"}, None
+            if route in ("/api/tools/call", "/admin"):
+                return 404, {"error": "Not Found"}, None
+            if route == "/mcp":
+                return 401, {"error": "Unauthorized"}, None
+            if route == "/.well-known/oauth-protected-resource":
+                return 200, {
+                    "resource": "https://example.com/mcp",
+                    "authorization_servers": ["https://example.com"],
+                    "bearer_methods_supported": ["header"],
+                }, None
+            if route == "/.well-known/oauth-authorization-server":
+                return 200, {
+                    "issuer": "https://example.com",
+                    "authorization_endpoint": "https://example.com/oauth/authorize",
+                    "token_endpoint": "https://example.com/oauth/token",
+                    "revocation_endpoint": "https://example.com/oauth/revoke",
+                    "code_challenge_methods_supported": ["S256"],
+                    "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                }, None
+            raise AssertionError(route)
+
+        request.side_effect = reply
+        checks = public_surface_checks_with_mode("https://example.com", expect_plugin_mcp=True)
+        self.assertTrue(all(item["passed"] for item in checks), checks)
+        hidden = {item["route"] for item in checks if item["check"] == "public_surface_hidden"}
+        self.assertEqual(hidden, {"/api/tools/call", "/admin"})
+        self.assertTrue(any(item["check"] == "plugin_mcp_requires_oauth" for item in checks))
+        self.assertTrue(any(item["check"] == "plugin_oauth_protected_resource_metadata" for item in checks))
+        self.assertTrue(any(item["check"] == "plugin_oauth_authorization_server_metadata" for item in checks))
 
     @patch("scripts.webpi.security_smoke.request_json")
     def test_loopback_expected_origin_keeps_full_local_auth_matrix(self, request):

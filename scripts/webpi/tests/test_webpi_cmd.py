@@ -48,6 +48,8 @@ class WebPiCmdTests(unittest.TestCase):
         self.assertIn("webpi.cmd doctor", completed.stdout)
         self.assertIn("webpi.cmd run", completed.stdout)
         self.assertIn("webpi.cmd verify", completed.stdout)
+        self.assertIn("webpi.cmd plugin-mcp-config", completed.stdout)
+        self.assertIn("webpi.cmd plugin-auth-provision", completed.stdout)
         self.assertIn("webpi.cmd pi", completed.stdout)
         self.assertNotIn("standalone.py", completed.stdout)
 

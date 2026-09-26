@@ -1,0 +1,28 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "webpi-agent",
+  "version": "0.1.0",
+  "description": "Use WebPi as the trusted local-project execution gateway for coding, files, Git, Runner jobs, Pi extensions, and release workflows.",
+  "author": {
+    "name": "WebPi"
+  },
+  "repository": "https://github.com/iydjjjjjj/webcodex",
+  "keywords": ["webpi", "coding", "git", "runner", "mcp"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "WebPi Agent",
+        "shortDescription": "Trusted WebPi project execution workflows",
+        "longDescription": "Inspect, edit, validate, test, review, and release local projects through WebPi's scoped Runner and MCP authority model.",
+        "developerName": "WebPi",
+        "category": "Developer Tools",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://webpi.piforme.vip",
+        "defaultPrompt": [
+          "Use WebPi to inspect this project and continue the current goal safely.",
+          "Use WebPi to reproduce this bug, fix it with tests, and review the diff."
+        ]
+      }
+    }
+  }
+}

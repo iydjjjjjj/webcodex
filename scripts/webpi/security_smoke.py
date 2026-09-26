@@ -79,6 +79,12 @@ def authentication_checks(origin: str, timeout: float = 8.0) -> list[dict[str, o
 
 
 def public_surface_checks(origin: str, timeout: float = 8.0) -> list[dict[str, object]]:
+    return public_surface_checks_with_mode(origin, timeout=timeout, expect_plugin_mcp=False)
+
+
+def public_surface_checks_with_mode(
+    origin: str, *, timeout: float = 8.0, expect_plugin_mcp: bool = False
+) -> list[dict[str, object]]:
     base = validate_origin(origin)
     credentials = (
         ("missing", None),
@@ -90,14 +96,48 @@ def public_surface_checks(origin: str, timeout: float = 8.0) -> list[dict[str, o
     for label, header in credentials:
         status, _, error = request_json(base, "/api/actions/runtime_status", {"compact": True}, header, timeout)
         checks.append({"check": label, "route": "/api/actions/runtime_status", "status": status, "passed": status == 401 and error is None, "error": error})
-    hidden = (
+    hidden = [
         ("/api/tools/call", {"tool": "runtime_status", "params": {"compact": True}}),
-        ("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
         ("/admin", None),
-    )
+    ]
+    if not expect_plugin_mcp:
+        hidden.append(("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}))
     for route, body in hidden:
         status, _, error = request_json(base, route, body, None, timeout)
         checks.append({"check": "public_surface_hidden", "route": route, "status": status, "passed": status == 404 and error is None, "error": error})
+
+    if expect_plugin_mcp:
+        status, _, error = request_json(
+            base,
+            "/mcp",
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            None,
+            timeout,
+        )
+        checks.append({"check": "plugin_mcp_requires_oauth", "route": "/mcp", "status": status, "passed": status == 401 and error is None, "error": error})
+
+        status, protected, error = request_json(base, "/.well-known/oauth-protected-resource", None, None, timeout)
+        protected_ok = (
+            status == 200
+            and isinstance(protected, dict)
+            and protected.get("resource") == f"{base}/mcp"
+            and protected.get("authorization_servers") == [base]
+            and protected.get("bearer_methods_supported") == ["header"]
+        )
+        checks.append({"check": "plugin_oauth_protected_resource_metadata", "status": status, "passed": protected_ok and error is None, "error": error})
+
+        status, metadata, error = request_json(base, "/.well-known/oauth-authorization-server", None, None, timeout)
+        metadata_ok = (
+            status == 200
+            and isinstance(metadata, dict)
+            and metadata.get("issuer") == base
+            and metadata.get("authorization_endpoint") == f"{base}/oauth/authorize"
+            and metadata.get("token_endpoint") == f"{base}/oauth/token"
+            and metadata.get("revocation_endpoint") == f"{base}/oauth/revoke"
+            and "S256" in (metadata.get("code_challenge_methods_supported") or [])
+            and "client_secret_post" in (metadata.get("token_endpoint_auth_methods_supported") or [])
+        )
+        checks.append({"check": "plugin_oauth_authorization_server_metadata", "status": status, "passed": metadata_ok and error is None, "error": error})
     return checks
 
 
@@ -120,11 +160,21 @@ def require_authenticated_origin(origin: str, timeout: float = 2.0) -> None:
         raise RuntimeError("WebPi authentication acceptance failed (expected HTTP 401; observed " + ", ".join(statuses) + "). Do not expose this runtime through a tunnel.")
 
 
-def verify(origin: str, expected_public_origin: str | None = None, token: str | None = None) -> dict[str, object]:
+def verify(
+    origin: str,
+    expected_public_origin: str | None = None,
+    token: str | None = None,
+    *,
+    expect_plugin_mcp: bool = False,
+) -> dict[str, object]:
     base = validate_origin(origin)
     hostname = urllib.parse.urlsplit(base).hostname
     loopback = hostname in ("127.0.0.1", "localhost", "::1")
-    checks = public_surface_checks(base) if expected_public_origin is not None and not loopback else authentication_checks(base)
+    checks = (
+        public_surface_checks_with_mode(base, expect_plugin_mcp=expect_plugin_mcp)
+        if expected_public_origin is not None and not loopback
+        else authentication_checks(base)
+    )
     status, schema, error = request_json(base, "/openapi.json", None)
     components = schema.get("components") if isinstance(schema, dict) else None
     valid_schema = status == 200 and isinstance(schema, dict) and isinstance(schema.get("paths"), dict) and str(schema.get("openapi", "")).startswith("3.")
@@ -151,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=LOCAL_ORIGIN)
     parser.add_argument("--expect-public-origin")
+    parser.add_argument("--expect-plugin-mcp", action="store_true", help="Expect the public origin to expose OAuth-protected Plugin MCP while keeping internal tool/admin routes hidden")
     parser.add_argument("--with-action-token", action="store_true", help="Use this checkout's local Action PAT without displaying it; only for loopback or its configured public origin")
     args = parser.parse_args(argv)
     base = validate_origin(args.base_url)
@@ -170,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         if token_path.is_symlink() or token_path.resolve().parent != state.resolve():
             raise ValueError("Action credential path must remain in the WebPi state directory")
         token = token_path.read_text(encoding="utf-8").strip()
-    report = verify(base, args.expect_public_origin, token)
+    report = verify(base, args.expect_public_origin, token, expect_plugin_mcp=args.expect_plugin_mcp)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["passed"] else 1
 

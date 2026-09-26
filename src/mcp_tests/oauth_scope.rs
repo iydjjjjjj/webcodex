@@ -81,6 +81,18 @@ fn assert_mcp_oauth_scope_rejected(
         );
         assert!(challenge.contains(scope), "challenge: {}", challenge);
     }
+    let mcp_challenges = body
+        .pointer("/_meta/mcp~1www_authenticate")
+        .and_then(Value::as_array)
+        .expect("OAuth MCP rejection must expose mcp/www_authenticate metadata");
+    assert!(
+        mcp_challenges.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| value.contains("error=\"insufficient_scope\""))
+        }),
+        "body: {body:?}"
+    );
 }
 
 #[tokio::test]
@@ -117,6 +129,16 @@ async fn oauth2_mcp_tools_list_requires_runtime_read() {
     let (_tmp, service, token) = oauth_mcp_service("runtime:read");
     let (status, body, _) = oauth_mcp_request(&service, &token, "tools/list", json!({})).await;
     assert_eq!(status, StatusCode::OK, "body: {:?}", body);
+    let runtime_status = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "runtime_status")
+        .expect("runtime_status descriptor");
+    assert_eq!(
+        runtime_status["securitySchemes"],
+        json!([{"type":"oauth2","scopes":[crate::auth::SCOPE_RUNTIME_READ]}])
+    );
 
     let (_tmp, service, token) = oauth_mcp_service("project:read");
     let (status, body, challenge) =
@@ -165,6 +187,16 @@ async fn oauth2_mcp_local_gateway_catalog_and_call_require_explicit_scope() {
         .unwrap()
         .iter()
         .any(|tool| tool["name"] == crate::mcp_gateway::MCP_TOOL_NAME));
+    let local_gateway = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == crate::mcp_gateway::MCP_TOOL_NAME)
+        .expect("mcp local gateway descriptor");
+    assert_eq!(
+        local_gateway["securitySchemes"],
+        json!([{"type":"oauth2","scopes":[crate::auth::SCOPE_MCP_LOCAL]}])
+    );
 
     let (status, body, _) = oauth_mcp_request(
         &service,

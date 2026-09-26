@@ -20,6 +20,7 @@ use salvo::http::{HeaderValue, Method, StatusCode};
 use salvo::prelude::*;
 
 const PUBLIC_ACTIONS_ONLY_ENV: &str = "WEBPI_PUBLIC_ACTIONS_ONLY";
+const PUBLIC_PLUGIN_MCP_ENABLED_ENV: &str = "WEBPI_PUBLIC_PLUGIN_MCP_ENABLED";
 const INVALID_AUTH_RATE_LIMIT_ENABLED_ENV: &str = "WEBPI_PUBLIC_INVALID_AUTH_RATE_LIMIT_ENABLED";
 const INVALID_AUTH_RATE_LIMIT_MAX_ENV: &str = "WEBPI_PUBLIC_INVALID_AUTH_RATE_LIMIT_MAX";
 const INVALID_AUTH_RATE_LIMIT_WINDOW_SECS_ENV: &str =
@@ -107,6 +108,60 @@ static INVALID_AUTH_LIMITER: OnceLock<Mutex<InvalidAuthLimiter>> = OnceLock::new
 
 pub(crate) fn public_actions_only_enabled() -> bool {
     crate::config::env_flag(PUBLIC_ACTIONS_ONLY_ENV).unwrap_or(false)
+}
+
+pub(crate) fn public_plugin_mcp_enabled() -> bool {
+    crate::config::env_flag(PUBLIC_PLUGIN_MCP_ENABLED_ENV).unwrap_or(false)
+}
+
+fn canonical_https_root_origin(label: &str, value: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(value.trim())
+        .map_err(|_| format!("{label} must be a valid absolute HTTPS URL"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
+        return Err(format!(
+            "{label} must be a root HTTPS origin without userinfo, path, query, or fragment"
+        ));
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
+pub(crate) fn validate_public_plugin_mcp_config(config: &crate::Config) -> Result<(), String> {
+    if !public_plugin_mcp_enabled() {
+        return Ok(());
+    }
+    if !public_actions_only_enabled() {
+        return Err(
+            "WEBPI_PUBLIC_PLUGIN_MCP_ENABLED requires WEBPI_PUBLIC_ACTIONS_ONLY=true".to_string(),
+        );
+    }
+    if !config.oauth2.enabled {
+        return Err("public Plugin MCP requires WEBPI_OAUTH2_ENABLED=true".to_string());
+    }
+    if !config.oauth2.require_pkce {
+        return Err("public Plugin MCP requires OAuth PKCE S256".to_string());
+    }
+    let public_url = std::env::var("WEBPI_PUBLIC_URL")
+        .map_err(|_| "public Plugin MCP requires WEBPI_PUBLIC_URL".to_string())?;
+    let issuer = config
+        .oauth2
+        .issuer
+        .as_deref()
+        .ok_or_else(|| "public Plugin MCP requires an OAuth issuer".to_string())?;
+    let public_origin = canonical_https_root_origin("WEBPI_PUBLIC_URL", &public_url)?;
+    let issuer_origin = canonical_https_root_origin("OAuth issuer", issuer)?;
+    if public_origin != issuer_origin {
+        return Err(
+            "public Plugin MCP requires OAuth issuer to match WEBPI_PUBLIC_URL".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn public_invalid_auth_rate_limit_enabled() -> bool {
@@ -210,7 +265,33 @@ pub(crate) fn is_public_request(req: &Request) -> bool {
         && (valid_cloudflare_connecting_ip(req).is_some() || request_host_matches_public_url(req))
 }
 
+fn public_plugin_mcp_surface_allowed(method: &Method, path: &str) -> bool {
+    if !public_plugin_mcp_enabled() {
+        return false;
+    }
+    (method == Method::GET
+        && matches!(
+            path,
+            "/mcp"
+                | "/.well-known/oauth-protected-resource"
+                | "/.well-known/oauth-authorization-server"
+                | "/oauth/authorize"
+        ))
+        || (method == Method::POST
+            && matches!(
+                path,
+                "/mcp"
+                    | "/oauth/authorize/login"
+                    | "/oauth/authorize/consent"
+                    | "/oauth/token"
+                    | "/oauth/revoke"
+            ))
+}
+
 fn public_surface_allowed(method: &Method, path: &str) -> bool {
+    if public_plugin_mcp_surface_allowed(method, path) {
+        return true;
+    }
     if path == "/openapi.json" {
         return matches!(*method, Method::GET | Method::HEAD);
     }

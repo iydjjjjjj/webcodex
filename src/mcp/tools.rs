@@ -854,6 +854,29 @@ pub(super) fn project_job_terminal_resume_suggested_call(
     );
 }
 
+fn mcp_tool_security_schemes(tool_name: &str) -> Value {
+    use webcodex_core::authority::ToolAuthorityPolicy;
+
+    let authority = crate::tool_runtime::metadata::lookup_tool_metadata(tool_name)
+        .map(|metadata| metadata.authority)
+        .unwrap_or(ToolAuthorityPolicy::Unknown);
+    match authority {
+        ToolAuthorityPolicy::Require(scope) => {
+            json!([{"type": "oauth2", "scopes": [scope]}])
+        }
+        ToolAuthorityPolicy::RequireAll(scopes) => {
+            json!([{"type": "oauth2", "scopes": scopes}])
+        }
+        ToolAuthorityPolicy::RequireAny(scopes) => Value::Array(
+            scopes
+                .iter()
+                .map(|scope| json!({"type": "oauth2", "scopes": [scope]}))
+                .collect(),
+        ),
+        ToolAuthorityPolicy::Unknown => json!([{"type": "oauth2", "scopes": []}]),
+    }
+}
+
 fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> Value {
     let tool_name = spec.name.clone();
     if matches!(tool_name.as_str(), "computer_observe" | "browser_observe") {
@@ -899,6 +922,12 @@ fn mcp_tool_spec_json(mut spec: ToolSpec, compact: bool, app_enabled: bool) -> V
             "annotations": annotations,
         })
     };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "securitySchemes".to_string(),
+            mcp_tool_security_schemes(&tool_name),
+        );
+    }
     if !compact && tool_name == crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME {
         if let Some(object) = value.as_object_mut() {
             object.insert(

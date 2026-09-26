@@ -1,6 +1,6 @@
 # WebPi Custom GPT -> Plugin migration plan
 
-Status: prepared; migration execution is blocked on first-release PR/deploy and ChatGPT-side migration UI/admin permissions.
+Status: first-release PR/deploy completed; OAuth-protected Plugin MCP implementation and second-round validation are in progress. Final ChatGPT installation/linking remains a UI boundary.
 
 ## Current platform contract (2026-09-26)
 
@@ -26,16 +26,20 @@ ChatGPT plugin skill
 
 Do not create a second durable state store, shared administrator token, or bypass path around WebPi scopes. Plugin references and UI affordances grant no authority by themselves.
 
-## Migration sequence
+## Implemented migration design
 
-1. Finish first-release review and PR for the WebPi runtime candidate.
-2. Deploy the exact reviewed revision through WebPi service control only.
-3. Verify public origin, source alignment, auth, MCP, file/edit, Git, Job recovery and plugin/Pi bridge smoke against the deployed revision.
-4. In ChatGPT, migrate the latest published WebPi Agent GPT to a private plugin.
-5. Review the migrated skill instructions and reference files; keep WebPi as the sole local-project execution entry.
-6. Rebuild the GPT custom Action integration as a custom MCP/app pointing at the deployed WebPi public origin. Do not copy the Action bearer credential into skill text or reference files.
-7. Run the acceptance matrix below while the plugin remains private.
-8. Only after acceptance, review sharing/publishing permissions and make a separate visibility decision.
+1. First-release review, fork/Draft PR, clean durable deployment and post-deploy smoke are complete.
+2. `plugins/webpi-agent/` is a portable Plugin package: root `plugin.json`, root `mcp.json`, and a WebPi skill. It contains no credential material.
+3. The bundled remote connection is streamable HTTP at `https://webpi.piforme.vip/mcp`.
+4. Public MCP remains default-off. `WEBPI_PUBLIC_PLUGIN_MCP_ENABLED=true` only admits MCP plus the minimum OAuth protocol routes; `/api/tools/call`, admin, OAuth-client management, bridge and project-share routes stay hidden.
+5. Public Plugin MCP fails closed before listener startup unless Actions-only remains enabled, OAuth is enabled, PKCE is required, and the OAuth issuer exactly matches the root HTTPS public origin.
+6. Existing WebPi authorization-code OAuth is reused: PKCE S256, RFC 8707 resource binding, refresh/revoke support, and RFC 9207 issuer-bound success/error authorization responses.
+7. Tool descriptors expose OAuth `securitySchemes` from the same canonical WebPi authority policy used for dispatch. OAuth scope failures expose `mcp/www_authenticate` metadata while retaining server-side scope enforcement.
+8. A predefined ChatGPT OAuth client is used instead of adding DCR. This avoids weakening the existing explicit OAuth-client owner invariant or adding a second registration trust path. Because WebPi advertises issuer identity and binds the authorize response issuer, the stable callback is `https://chatgpt.com/connector_platform_oauth_redirect`; if that issuer contract changes, re-read the callback shown by ChatGPT before changing the allowlist.
+9. A dedicated normal-user PAT is used only to sign into WebPi's OAuth authorize page. It is separate from the ChatGPT Action PAT and carries no API scopes. The OAuth client allowlist is explicitly bounded to the existing coding workflow and excludes account/admin/service/control scopes. Client secret and login PAT remain in protected `.webpi-state` files and never enter the Plugin package, repository, prompts, or chat.
+10. `webpi.cmd plugin-mcp-config` idempotently enables the fail-closed public Plugin-MCP/OAuth configuration on the already configured HTTPS public origin. `webpi.cmd plugin-auth-provision` idempotently creates/rotates the dedicated login PAT and predefined OAuth client without printing secrets.
+11. `python scripts/webpi/plugin_mcp_smoke.py --base-url https://webpi.piforme.vip` performs a real authorization-code + PKCE + RFC 8707 resource-bound OAuth flow, exercises MCP `tools/list` and `runtime_status`, then revokes its short-lived OAuth tokens. Its report contains no credentials or tokens.
+12. After backend acceptance, migrate/install the Plugin privately in ChatGPT, enter the predefined OAuth client metadata through the Plugin UI, link OAuth, run the acceptance matrix below, and only then consider sharing/publishing.
 
 ## Acceptance matrix
 
@@ -51,11 +55,11 @@ Do not create a second durable state store, shared administrator token, or bypas
 - Security: no secrets in skill/reference files, logs, prompts or plugin metadata.
 - Output quality: familiar prompts plus one harder end-to-end coding task match or improve the custom GPT workflow.
 - Performance: compare tool-call count/handoff/cleanup against the preserved baseline.
+- OAuth protocol: protected-resource and authorization-server discovery, stable issuer-bound callback, PKCE S256, repeated `resource`, exact client allowlist, and post-smoke revocation all pass without emitting secrets.
 
-## Current blockers
+## Current external boundary
 
-- PR publication: upstream repository is read-only for the current GitHub account and no fork exists. Creating a fork is an external side effect that requires explicit approval.
-- Deployment: current WebPi credential lacks service:restart and service:deploy; deployment_preflight is blocked.
-- Candidate provenance: the source worktree was already heavily dirty before this audit and no start-of-session file snapshot exists. Do not claim a clean goal-only PR from the whole worktree.
-- Disposable Docker image smoke: local build did not start because Docker Hub OAuth returned EOF and required base images were not cached; remote release-readiness CI must provide that image proof.
-- ChatGPT migration: requires the account/workspace migration UI and any needed plugin/custom-MCP permissions. This is a user/admin UI boundary when reached.
+- First-release Draft PR: `yyjeqhc/webcodex#689`; its exact reviewed revision was deployed successfully with clean Server/Runner source alignment and public security smoke.
+- The second Plugin delta will be reviewed, pushed and deployed through the same receipt-fenced workflow before ChatGPT linking.
+- Disposable Docker image smoke remains a remote-CI proof because local Docker Hub OAuth returned EOF and no base images were cached.
+- Final ChatGPT Plugin installation/migration, predefined OAuth client entry and private linking require the account/workspace Plugin UI. No secret will be printed into chat; the client secret and login PAT stay in protected local state and are only entered at that UI boundary.

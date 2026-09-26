@@ -1107,8 +1107,21 @@ fn scope_forbidden(
     required_scope: Option<&'static str>,
     description: impl Into<String>,
 ) -> McpOutcome {
+    let mut body = crate::auth::scope_forbidden_body(auth, description);
+    if auth.is_some_and(AuthContext::is_oauth_token) {
+        let challenge = format!(
+            "{}, error_description=\"Additional OAuth scope is required for this WebPi tool\"",
+            crate::auth::oauth_insufficient_scope_challenge(required_scope)
+        );
+        if let Some(object) = body.as_object_mut() {
+            object.insert(
+                "_meta".to_string(),
+                json!({"mcp/www_authenticate": [challenge]}),
+            );
+        }
+    }
     McpOutcome::Forbidden {
-        body: crate::auth::scope_forbidden_body(auth, description),
+        body,
         required_scope,
     }
 }

@@ -222,6 +222,8 @@ pub async fn run_server_with_parent_liveness(
     {
         return Err("WebPi requires a non-empty bootstrap credential and disabled anonymous/shared-key/query-token modes".into());
     }
+    public_http_security::validate_public_plugin_mcp_config(&config)
+        .map_err(std::io::Error::other)?;
     let (acceptor, listener_mode, listener_addr) = server_listener::server_acceptor(&config.addr)
         .await
         .map_err(std::io::Error::other)?;
