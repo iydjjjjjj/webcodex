@@ -60,7 +60,7 @@ PLUGIN_OAUTH_CLIENT_FILE = STATE / "webpi-plugin-oauth-client.json"
 PLUGIN_LOGIN_TOKEN_NAME = "webpi-plugin-login"
 PLUGIN_OAUTH_CLIENT_NAME = "webpi-chatgpt-plugin"
 PLUGIN_OAUTH_REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect"
-PLUGIN_OAUTH_ALLOWED_SCOPES = (
+PLUGIN_OAUTH_DEFAULT_SCOPES = (
     "runtime:read",
     "runner:manage",
     "session:collaborate",
@@ -73,6 +73,31 @@ PLUGIN_OAUTH_ALLOWED_SCOPES = (
     "computer:display_read",
     "browser:read",
     "diagnostics:read",
+)
+PLUGIN_OAUTH_UPGRADEABLE_SCOPES = (
+    "communication:read",
+    "communication:manage",
+    "memory:read",
+    "memory:manage",
+    "job:detach",
+    "service:restart",
+    "service:deploy",
+    "browser:control",
+    "browser:launch",
+    "computer:control",
+    "computer:launch",
+    "computer:pointer_control",
+    "computer:clipboard_read",
+    "computer:clipboard_write",
+    "mcp:local",
+    "plugin:mutate",
+    "plugin:manage",
+    "ssh:local",
+    "coding_agent:run",
+)
+PLUGIN_OAUTH_ALLOWED_SCOPES = (
+    *PLUGIN_OAUTH_DEFAULT_SCOPES,
+    *PLUGIN_OAUTH_UPGRADEABLE_SCOPES,
 )
 ACTION_TOKEN_NAME = "webpi-action"
 PORT = 56542
@@ -1130,7 +1155,7 @@ def _load_plugin_oauth_client_secret() -> dict[str, object] | None:
     return value
 
 
-def _plugin_oauth_client_matches(item: object, client_id: str) -> bool:
+def _plugin_oauth_client_base_matches(item: object, client_id: str) -> bool:
     if not isinstance(item, dict):
         return False
     return (
@@ -1138,8 +1163,14 @@ def _plugin_oauth_client_matches(item: object, client_id: str) -> bool:
         and item.get("name") == PLUGIN_OAUTH_CLIENT_NAME
         and item.get("revoked_at") is None
         and item.get("redirect_uris") == [PLUGIN_OAUTH_REDIRECT_URI]
-        and item.get("allowed_scopes") == list(PLUGIN_OAUTH_ALLOWED_SCOPES)
     )
+
+
+def _plugin_oauth_client_matches(item: object, client_id: str) -> bool:
+    if not _plugin_oauth_client_base_matches(item, client_id) or not isinstance(item, dict):
+        return False
+    scopes = item.get("allowed_scopes")
+    return isinstance(scopes, list) and set(scopes) == set(PLUGIN_OAUTH_ALLOWED_SCOPES)
 
 
 def provision_plugin_oauth_client() -> dict[str, object]:
@@ -1150,8 +1181,27 @@ def provision_plugin_oauth_client() -> dict[str, object]:
 
     stored = _load_plugin_oauth_client_secret()
     current_id = str(stored.get("client_id")) if stored is not None else ""
-    current = next((item for item in clients if _plugin_oauth_client_matches(item, current_id)), None)
+    current = next(
+        (item for item in clients if _plugin_oauth_client_base_matches(item, current_id)),
+        None,
+    )
     rotated = current is None
+    scopes_updated = False
+    reauthorization_required = False
+
+    if current is not None and not _plugin_oauth_client_matches(current, current_id):
+        updated = admin_post(
+            "/api/oauth/clients/update_scopes",
+            {
+                "client_id": current_id,
+                "allowed_scopes": list(PLUGIN_OAUTH_ALLOWED_SCOPES),
+            },
+        )
+        current = updated.get("client") if isinstance(updated, dict) else None
+        if not _plugin_oauth_client_matches(current, current_id):
+            raise RuntimeError("WebPi Plugin OAuth client scope update did not converge")
+        scopes_updated = bool(updated.get("changed", True))
+        reauthorization_required = bool(updated.get("reauthorization_required", scopes_updated))
 
     if current is None:
         created = admin_post(
@@ -1180,6 +1230,20 @@ def provision_plugin_oauth_client() -> dict[str, object]:
             json.dumps(stored, ensure_ascii=False, indent=2),
         )
         current_id = client_id
+        current = client
+
+    if stored is None:
+        raise RuntimeError("WebPi Plugin OAuth client secret metadata is unavailable")
+    desired_stored = dict(stored)
+    desired_stored["client_id"] = current_id
+    desired_stored["redirect_uri"] = PLUGIN_OAUTH_REDIRECT_URI
+    desired_stored["allowed_scopes"] = list(PLUGIN_OAUTH_ALLOWED_SCOPES)
+    if desired_stored != stored:
+        _write_private_text(
+            PLUGIN_OAUTH_CLIENT_FILE,
+            json.dumps(desired_stored, ensure_ascii=False, indent=2),
+        )
+        stored = desired_stored
 
     stale_ids = [
         str(item.get("client_id"))
@@ -1199,7 +1263,10 @@ def provision_plugin_oauth_client() -> dict[str, object]:
         "rotated": rotated,
         "client_id": current_id,
         "redirect_uri": PLUGIN_OAUTH_REDIRECT_URI,
+        "default_scopes": list(PLUGIN_OAUTH_DEFAULT_SCOPES),
         "allowed_scopes": list(PLUGIN_OAUTH_ALLOWED_SCOPES),
+        "scopes_updated": scopes_updated,
+        "reauthorization_required": reauthorization_required,
         "client_secret_file": str(PLUGIN_OAUTH_CLIENT_FILE),
         "stale_revoked": len(stale_ids),
     }

@@ -18,6 +18,7 @@ from standalone import (
     PLUGIN_LOGIN_TOKEN_FILE,
     PLUGIN_OAUTH_ALLOWED_SCOPES,
     PLUGIN_OAUTH_CLIENT_FILE,
+    PLUGIN_OAUTH_DEFAULT_SCOPES,
     PLUGIN_OAUTH_REDIRECT_URI,
 )
 
@@ -113,12 +114,15 @@ def run_smoke(origin: str, timeout: float = 10.0) -> dict[str, object]:
         raise RuntimeError("Plugin OAuth client secret is malformed")
     if redirect_uri != PLUGIN_OAUTH_REDIRECT_URI:
         raise RuntimeError("Plugin OAuth redirect URI does not match the supported ChatGPT callback")
+    stored_allowed = client_record.get("allowed_scopes")
+    if not isinstance(stored_allowed, list) or set(stored_allowed) != set(PLUGIN_OAUTH_ALLOWED_SCOPES):
+        raise RuntimeError("Plugin OAuth client metadata does not match the upgradeable allowlist")
 
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPCookieProcessor(cookie_jar))
     verifier, challenge = _pkce_pair()
     state = "webpi-plugin-smoke-" + secrets.token_hex(12)
-    scope = " ".join(PLUGIN_OAUTH_ALLOWED_SCOPES)
+    scope = " ".join(PLUGIN_OAUTH_DEFAULT_SCOPES)
     authorize = {
         "response_type": "code",
         "client_id": client_id,
@@ -190,8 +194,8 @@ def run_smoke(origin: str, timeout: float = 10.0) -> dict[str, object]:
         raise RuntimeError("Plugin OAuth token exchange returned no access token")
     if not isinstance(refresh_token, str) or not refresh_token.startswith("wc_ort_"):
         raise RuntimeError("Plugin OAuth token exchange returned no refresh token")
-    if set(str(returned_scope or "").split()) != set(PLUGIN_OAUTH_ALLOWED_SCOPES):
-        raise RuntimeError("Plugin OAuth token scopes do not match the intended allowlist")
+    if set(str(returned_scope or "").split()) != set(PLUGIN_OAUTH_DEFAULT_SCOPES):
+        raise RuntimeError("Plugin OAuth token scopes do not match the default least-privilege grant")
 
     auth_header = "Bearer " + access_token
     status, _, raw = _request(
@@ -254,7 +258,8 @@ def run_smoke(origin: str, timeout: float = 10.0) -> dict[str, object]:
         "pkce": "S256",
         "resource_bound": True,
         "issuer_bound": True,
-        "scope_count": len(PLUGIN_OAUTH_ALLOWED_SCOPES),
+        "scope_count": len(PLUGIN_OAUTH_DEFAULT_SCOPES),
+        "upgradeable_scope_count": len(PLUGIN_OAUTH_ALLOWED_SCOPES),
         "tool_count": len(tools),
         "runtime_status_security_schemes_present": True,
         "tokens_revoked": True,
