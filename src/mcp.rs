@@ -469,6 +469,69 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     guard.parsed("ok");
     let server_trace_id = guard.correlation_trace_id();
     let auth = depot.obtain::<crate::auth::AuthContext>().ok().cloned();
+    if auth.is_none() && crate::public_http_security::public_plugin_mcp_enabled() {
+        let discovery_method = matches!(
+            request.method.as_str(),
+            "initialize" | "ping" | "tools/list" | "server/discover" | "notifications/initialized"
+        );
+        if !discovery_method {
+            if request.id.is_none() {
+                res.status_code(StatusCode::ACCEPTED);
+                guard.response_serialized(
+                    202,
+                    Some(0),
+                    Some(true),
+                    None,
+                    "unauthenticated_notification",
+                );
+                guard.handler_returned(
+                    202,
+                    Some(0),
+                    Some(true),
+                    None,
+                    "unauthenticated_notification",
+                );
+                return;
+            }
+            let issuer = authority_config
+                .oauth2
+                .issuer
+                .as_deref()
+                .unwrap_or_default()
+                .trim_end_matches('/');
+            let challenge = format!(
+                "Bearer resource_metadata=\"{issuer}/.well-known/oauth-protected-resource\", error=\"insufficient_scope\", error_description=\"Link your WebPi account to continue\""
+            );
+            let body = rpc_result(
+                request.id.clone(),
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "Authentication required: link your WebPi account to continue."
+                    }],
+                    "isError": true,
+                    "_meta": {"mcp/www_authenticate": [challenge]}
+                }),
+            );
+            let estimated = estimate_json_bytes(&body);
+            guard.response_serialized(
+                200,
+                estimated,
+                Some(true),
+                Some(false),
+                "oauth_link_required",
+            );
+            res.render(Json(body));
+            guard.handler_returned(
+                200,
+                estimated,
+                Some(true),
+                Some(false),
+                "oauth_link_required",
+            );
+            return;
+        }
+    }
     let live_principal = crate::tool_runtime::runtime_observation_principal(auth.as_ref()).ok();
     let window_registry = runtime.window_activity_registry();
     let mut live_window_request =

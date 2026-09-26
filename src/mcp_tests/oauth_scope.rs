@@ -96,6 +96,74 @@ fn assert_mcp_oauth_scope_rejected(
 }
 
 #[tokio::test]
+async fn public_plugin_mcp_allows_unauthenticated_discovery_but_challenges_tool_calls() {
+    let mut env = crate::test_support::TestEnvGuard::new();
+    env.set("WEBPI_PUBLIC_PLUGIN_MCP_ENABLED", "true");
+    let (_tmp, service, _token) = oauth_mcp_service("runtime:read");
+
+    for (method, params) in [
+        (
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "chatgpt-registration-test", "version": "1"}
+            }),
+        ),
+        ("tools/list", json!({})),
+    ] {
+        let mut resp = TestClient::post("http://localhost/mcp")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 41,
+                "method": method,
+                "params": params,
+            }))
+            .send(&service)
+            .await;
+        assert_eq!(effective_status(&resp), StatusCode::OK, "{method}");
+        let body = resp.take_json::<Value>().await.unwrap();
+        assert!(body.get("error").is_none(), "{method}: {body:?}");
+        if method == "tools/list" {
+            let runtime_status = body["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "runtime_status")
+                .expect("runtime_status descriptor");
+            assert_eq!(
+                runtime_status["_meta"]["securitySchemes"],
+                runtime_status["securitySchemes"]
+            );
+        }
+    }
+
+    let mut resp = TestClient::post("http://localhost/mcp")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/call",
+            "params": {
+                "name": "runtime_status",
+                "arguments": {"compact": true}
+            }
+        }))
+        .send(&service)
+        .await;
+    assert_eq!(effective_status(&resp), StatusCode::OK);
+    let body = resp.take_json::<Value>().await.unwrap();
+    assert_eq!(body["result"]["isError"], true, "body: {body:?}");
+    let challenges = body["result"]["_meta"]["mcp/www_authenticate"]
+        .as_array()
+        .expect("unauthenticated tool call must trigger linking metadata");
+    assert!(challenges.iter().any(|value| {
+        value.as_str().is_some_and(|value| {
+            value.contains("resource_metadata=") && value.contains("insufficient_scope")
+        })
+    }));
+}
+
+#[tokio::test]
 async fn pat_mcp_tools_list_requires_runtime_read_without_oauth_framing() {
     let runtime = test_runtime();
     let mut auth = mcp_export_api_auth("pat-project-read-only", "alice");

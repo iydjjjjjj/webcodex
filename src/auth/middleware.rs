@@ -321,6 +321,18 @@ impl Handler for AuthMiddleware {
                     ctrl.call_next(req, depot, res).await;
                     return;
                 }
+                if crate::public_http_security::public_plugin_mcp_enabled()
+                    && config.oauth2.enabled
+                    && req.uri().path() == "/mcp"
+                {
+                    // ChatGPT must be able to initialize the MCP transport and
+                    // inspect tool-level OAuth securitySchemes before it can
+                    // render the account-linking UI. The MCP protocol handler
+                    // below keeps discovery read-only and returns an OAuth
+                    // linking challenge for every unauthenticated tool call.
+                    ctrl.call_next(req, depot, res).await;
+                    return;
+                }
                 if allow_anonymous_enabled() {
                     // Explicit --open: anonymous callers get a non-admin open
                     // context. Surface restrictions and declared scopes still apply.
