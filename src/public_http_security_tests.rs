@@ -19,7 +19,12 @@ fn security_router() -> Router {
         .push(Router::with_path("artifact-download").get(ok_handler))
         .push(Router::with_path("api/actions/runtime_status").post(ok_handler))
         .push(Router::with_path("api/tools/call").post(ok_handler))
-        .push(Router::with_path("mcp").get(ok_handler).post(ok_handler))
+        .push(
+            Router::with_path("mcp")
+                .get(ok_handler)
+                .post(ok_handler)
+                .options(ok_handler),
+        )
         .push(Router::with_path(".well-known/oauth-protected-resource").get(ok_handler))
         .push(Router::with_path(".well-known/oauth-authorization-server").get(ok_handler))
         .push(Router::with_path("oauth/authorize").get(ok_handler))
@@ -90,6 +95,51 @@ async fn explicit_public_plugin_mcp_mode_exposes_only_mcp_and_oauth_protocol_rou
     env.set("WEBPI_PUBLIC_ACTIONS_ONLY", "true");
     env.set("WEBPI_PUBLIC_PLUGIN_MCP_ENABLED", "true");
     let service = Service::new(security_router());
+
+    let preflight = TestClient::options("http://webpi.example/mcp")
+        .add_header("host", "webpi.example", true)
+        .add_header("origin", "https://chatgpt.com", true)
+        .add_header("access-control-request-method", "POST", true)
+        .add_header(
+            "access-control-request-headers",
+            "content-type,mcp-protocol-version,mcp-session-id",
+            true,
+        )
+        .send(&service)
+        .await;
+    assert_eq!(preflight.status_code, Some(StatusCode::NO_CONTENT));
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|value| value.to_str().ok()),
+        Some("POST, GET, OPTIONS")
+    );
+    let allowed_headers = preflight
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    for header in ["content-type", "mcp-protocol-version", "mcp-session-id"] {
+        assert!(
+            allowed_headers.contains(header),
+            "missing {header}: {allowed_headers}"
+        );
+    }
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-expose-headers")
+            .and_then(|value| value.to_str().ok()),
+        Some("Mcp-Session-Id")
+    );
 
     for (method, path) in [
         ("GET", "/mcp"),

@@ -354,6 +354,42 @@ pub(crate) fn render_invalid_auth_rate_limit_if_needed(
     true
 }
 
+fn render_public_plugin_mcp_preflight(
+    req: &Request,
+    res: &mut Response,
+    ctrl: &mut FlowCtrl,
+) -> bool {
+    if !is_public_request(req)
+        || !public_plugin_mcp_enabled()
+        || req.method() != Method::OPTIONS
+        || req.uri().path() != "/mcp"
+    {
+        return false;
+    }
+
+    res.status_code(StatusCode::NO_CONTENT);
+    let headers = res.headers_mut();
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("POST, GET, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static(
+            "authorization, content-type, mcp-protocol-version, mcp-session-id",
+        ),
+    );
+    headers.insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static("Mcp-Session-Id"),
+    );
+    headers.insert("access-control-max-age", HeaderValue::from_static("600"));
+    headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    ctrl.skip_rest();
+    true
+}
+
 pub(crate) struct PublicHttpSecurity;
 
 #[async_trait]
@@ -365,6 +401,9 @@ impl Handler for PublicHttpSecurity {
         res: &mut Response,
         ctrl: &mut FlowCtrl,
     ) {
+        if render_public_plugin_mcp_preflight(req, res, ctrl) {
+            return;
+        }
         if !is_public_request(req) || public_surface_allowed(req.method(), req.uri().path()) {
             ctrl.call_next(req, depot, res).await;
             return;

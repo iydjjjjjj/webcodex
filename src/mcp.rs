@@ -247,6 +247,11 @@ fn mcp_tools_list_audit_summary(
 }
 
 #[handler]
+pub async fn mcp_options(res: &mut Response) {
+    res.status_code(StatusCode::NO_CONTENT);
+}
+
+#[handler]
 pub async fn mcp_info(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let Some(config) = crate::auth::get_config(depot) else {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);

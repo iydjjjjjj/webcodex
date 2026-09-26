@@ -739,7 +739,8 @@ pub async fn run_server_with_parent_liveness(
             ))
             .hoop(AuthMiddleware)
             .get(mcp::mcp_info)
-            .post(mcp::mcp_post),
+            .post(mcp::mcp_post)
+            .options(mcp::mcp_options),
         );
 
     // Read-only audit query API. Admin/debug surface only: NOT part of the
